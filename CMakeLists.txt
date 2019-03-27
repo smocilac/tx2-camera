@@ -28,7 +28,7 @@ endif()
 include_directories(/usr/local/cuda/include)
 
 
-add_executable( camera_test fps_test_gstreamer.cpp )
+add_executable( camera_test camera_test.cpp )
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include/include-jetson-inference)
 
