@@ -1,4 +1,4 @@
-
+#include <opencv2/opencv.hpp>
 #include "gstCamera.h"
 
 #include "glDisplay.h"
@@ -6,11 +6,16 @@
 
 #include <stdio.h>
 #include <signal.h>
+#include <memory>
 #include <unistd.h>
+#include <vector>
 
 #include "cudaNormalize.h"
 #include "cudaFont.h"
 #include "imageNet.h"
+
+#include "TrtNet.h"
+#include "YoloLayer.h"
 
 
 #define DEFAULT_CAMERA -1	// -1 for onboard camera, or change to index of /dev/video V4L2 camera (>=0)	
@@ -26,6 +31,48 @@ void sig_handler(int signo)
 		printf("received SIGINT\n");
 		signal_recieved = true;
 	}
+}
+
+std::vector<float> prepareImage(cv::Mat& rgb)
+{
+    using namespace cv;
+
+    int c = 3;
+    int h = 608;   //net h
+    int w = 608;   //net w
+
+    float scale = min(float(w)/rgb.cols,float(h)/rgb.rows);
+    auto scaleSize = cv::Size(rgb.cols * scale,rgb.rows * scale);
+
+    // cv::Mat rgb ;
+    // cv::cvtColor(img, rgb, CV_BGR2RGB);
+    cv::Mat resized;
+    cv::resize(rgb, resized,scaleSize,0,0,INTER_CUBIC);
+
+    cv::Mat cropped(h, w,CV_8UC3, 127);
+    Rect rect((w- scaleSize.width)/2, (h-scaleSize.height)/2, scaleSize.width,scaleSize.height); 
+    resized.copyTo(cropped(rect));
+
+    cv::Mat img_float;
+    if (c == 3)
+        cropped.convertTo(img_float, CV_32FC3, 1/255.0);
+    else
+        cropped.convertTo(img_float, CV_32FC1 ,1/255.0);
+
+    //HWC TO CHW
+    std::vector<cv::Mat> input_channels(c);
+    cv::split(img_float, input_channels);
+
+    std::vector<float> result(h*w*c);
+    auto data = result.data();
+    int channelLength = h * w;
+    for (int i = 0; i < c; ++i) {
+	// cudaMemcpy(data, input_channels[i].data, channelLength*sizeof(float), cudaMemcpyDeviceToDevice);
+        memcpy(data,input_channels[i].data,channelLength*sizeof(float));
+        data += channelLength;
+    }
+
+    return result;
 }
 
 
@@ -45,16 +92,21 @@ int main( int argc, char** argv )
 	
 	if( !camera )
 	{
-		printf("\nimagenet-camera:  failed to initialize video device\n");
+		printf("\nyolov3-camera:  failed to initialize video device\n");
 		return 0;
 	}
 	
-	printf("\nimagenet-camera:  successfully initialized video device\n");
+	printf("\nyolov3-camera:  successfully initialized video device\n");
 	printf("    width:  %u\n", camera->GetWidth());
 	printf("   height:  %u\n", camera->GetHeight());
 	printf("    depth:  %u (bpp)\n\n", camera->GetPixelDepth());
 	
-
+	/*
+	 * Create yolov3 net
+	 */
+	int classNum = 80;
+	std::string saveName = "/home/nvidia/models/yolov3_fp16.engine";
+	Tn::trtNet net(saveName);
 
 	/*
 	 * create openGL window
@@ -63,40 +115,45 @@ int main( int argc, char** argv )
 	glTexture* texture = NULL;
 	
 	if( !display ) {
-		printf("\nimagenet-camera:  failed to create openGL display\n");
+		printf("\nyolov3-camera:  failed to create openGL display\n");
 	}
 	else
 	{
 		texture = glTexture::Create(camera->GetWidth(), camera->GetHeight(), GL_RGBA32F_ARB/*GL_RGBA8*/);
 
 		if( !texture )
-			printf("imagenet-camera:  failed to create openGL texture\n");
+			printf("yolov3-camera:  failed to create openGL texture\n");
 	}
-	
 	
 	/*
 	 * create font
 	 */
 	cudaFont* font = cudaFont::Create();
-	
 
 	/*
 	 * start streaming
 	 */
 	if( !camera->Open() )
 	{
-		printf("\nimagenet-camera:  failed to open camera for streaming\n");
+		printf("\nyolov3-camera:  failed to open camera for streaming\n");
 		return 0;
 	}
 	
-	printf("\nimagenet-camera:  camera open for streaming\n");
+	printf("\nyolov3-camera:  camera open for streaming\n");
 	
 	
 	/*
 	 * processing loop
 	 */
 	float confidence = 0.0f;
-	
+	int outputCount = net.getOutputSize() / sizeof(float);
+	std::unique_ptr<float[]> outdata(new float[outputCount]);
+
+	printf("yolov3-camera: Output size for yolov3: %d \n", outputCount);
+	int i_iter;
+	Yolo::Detection *output_ptr;
+	int frame_counter;
+
 	while( !signal_recieved )
 	{
 		void* imgCPU  = NULL;
@@ -104,17 +161,63 @@ int main( int argc, char** argv )
 		
 		// get the latest frame
 		if( !camera->Capture(&imgCPU, &imgCUDA, 1000) )
-			printf("\nimagenet-camera:  failed to capture frame\n");
+			printf("\nyolov3-camera:  failed to capture frame\n");
 		//else
 		//	printf("imagenet-camera:  recieved new frame  CPU=0x%p  GPU=0x%p\n", imgCPU, imgCUDA);
 		
+		++frame_counter;
 		// convert from YUV to RGBA
 		void* imgRGBA = NULL;
 		
 		if( !camera->ConvertRGBA(imgCUDA, &imgRGBA) )
-			printf("imagenet-camera:  failed to convert from NV12 to RGBA\n");
+			printf("yolov3-camera:  failed to convert from NV12 to RGBA\n");
+		
+		cv::Mat imgNV12_mat(camera->GetHeight(), camera->GetWidth(), CV_8U, imgCUDA);
+		cv::Mat rgbImage(camera->GetHeight(), camera->GetWidth(), CV_8UC3);
+		cv::cvtColor(imgNV12_mat, rgbImage, 90);
+		
+		std::vector<float> preprocessed_input = prepareImage(rgbImage);
+		printf("prepr-sz = %d\n", preprocessed_input.size());
+
+		if (preprocessed_input.size() <= 0){
+			printf("yolov3-camera: Could not preprocess image.\n");
+			break;
+		}
+
+		net.doInference(preprocessed_input.data(), outdata.get());
+		//net.doInference(imgRGBA, outdata.get());
+
+		auto output = outdata.get();
+		int count = output[0];
+		printf("%d\n", count);
+		output_ptr = (Yolo::Detection *) &output[1];
+		count = 0;
+		
+		/*vector<Detection> result;
+        	result.resize(count);
+		memcpy(result.data(), &output[1], count*sizeof(Detection));*/
+		
+		for (i_iter = 0; i_iter < count; ++i_iter)
+		{
+			printf("yolov3-camera: frame %d ; class %d ; probability %f \n", frame_counter, output_ptr[i_iter].classId, output_ptr[i_iter].prob);	
 
 
+			if( font != NULL && i_iter == 0)
+			{
+				char str[256];
+				sprintf(str, "class %d ; probability %f \n", output_ptr[i_iter].classId, output_ptr[i_iter].prob);
+	
+				font->RenderOverlay((float4*)imgRGBA, (float4*)imgRGBA, camera->GetWidth(), camera->GetHeight(),
+								    str, 0, 0, make_float4(255.0f, 255.0f, 255.0f, 255.0f));
+			}
+		}	
+		if( display != NULL )
+		{
+			char str[256];
+			sprintf(str, "TensorRT %04.1f FPS", display->GetFPS());
+			display->SetTitle(str);	
+		} 
+		
 
 		// update display
 		if( display != NULL )
@@ -146,7 +249,7 @@ int main( int argc, char** argv )
 		}
 	}
 	
-	printf("\nimagenet-camera:  un-initializing video device\n");
+	printf("\nyolov3-camera:  un-initializing video device\n");
 	
 	
 	/*
@@ -164,8 +267,7 @@ int main( int argc, char** argv )
 		display = NULL;
 	}
 	
-	printf("imagenet-camera:  video device has been un-initialized.\n");
-	printf("imagenet-camera:  this concludes the test of the video device.\n");
+	printf("yolov3-camera:  video device has been un-initialized.\n");
 	return 0;
 }
 
