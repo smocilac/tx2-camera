@@ -12,6 +12,7 @@
 
 #include "cudaNormalize.h"
 #include "cudaFont.h"
+#include "imageNet.h"
 #include "cudaMappedMemory.h"
 #include "cudaOverlay.h"
 #include "cudaResize.h"
@@ -48,9 +49,7 @@ bool DrawBoxes( float* input, float* output, uint32_t width, uint32_t height, co
 									  mClassColors[0][classIndex*4+2],
 									  mClassColors[0][classIndex*4+3] );
 	
-	printf("draw boxes  %i  %i \n", width, height);
-	printf("draw boxes  %i  %i   %f %f %f %f\n", numBoxes, classIndex, color.x, color.y, color.z, color.w);
-	printf("draw boxes  %f %f %f %f\n", boundingBoxes[0], boundingBoxes[1], boundingBoxes[2], boundingBoxes[3]);
+	//printf("draw boxes  %i  %i   %f %f %f %f\n", numBoxes, classIndex, color.x, color.y, color.z, color.w);
 	
 	if( CUDA_FAILED(cudaRectOutlineOverlay((float4*)input, (float4*)output, width, height, (float4*)boundingBoxes, numBoxes, color)) )
 		return false;
@@ -255,22 +254,13 @@ int main( int argc, char** argv )
 		{
 			printf("yolov3-camera: frame %d ; class %d ; probability %f \n", frame_counter, output_ptr[i_iter].classId, output_ptr[i_iter].prob);	
 			printf("               x = %f ; y = %f ; w = %04.1f ; h = %04.1f \n", output_ptr[i_iter].bbox[0], output_ptr[i_iter].bbox[1], output_ptr[i_iter].bbox[2], output_ptr[i_iter].bbox[3]);  
-			output_ptr[i_iter].bbox[0] *= camera->GetWidth();
-			output_ptr[i_iter].bbox[1] *= camera->GetHeight();
-			output_ptr[i_iter].bbox[2] += output_ptr[i_iter].bbox[0];
-			output_ptr[i_iter].bbox[3] += output_ptr[i_iter].bbox[1];
-			const float4 bbox_ = make_float4(output_ptr[i_iter].bbox[0], output_ptr[i_iter].bbox[1], 
-					std::min((uint32_t)output_ptr[i_iter].bbox[2],camera->GetWidth()) , std::min((uint32_t)output_ptr[i_iter].bbox[3], camera->GetHeight()));
-
-			//CUDA(cudaDeviceSynchronize());
 			
 			if( !DrawBoxes((float*)imgRGBA, (float*)imgRGBA, camera->GetWidth(), camera->GetHeight(), 
-				                        (float*)&bbox_, 1, output_ptr[i_iter].classId) ) {
-				printf("yolov3-camera:  failed to draw boxes\n");
-				exit(0);			
-			}
+				                        outputCUDA[i_iter].bbox, 1, output_ptr[i_iter].classId) )
+				printf("detectnet-console:  failed to draw boxes\n");
+					
 			CUDA(cudaDeviceSynchronize());
-			
+			// return 0;
 
 			/* if( font != NULL && i_iter == 0)
 			{
