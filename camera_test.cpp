@@ -42,7 +42,7 @@ bool DrawBoxes( float* input, float* output, uint32_t width, uint32_t height, co
 		return false;
 
 
-    const float4 bbox_ = make_float4(output[0], output[1], std::min((uint32_t)output[2], width), std::min((uint32_t)output[3], height));
+    //const float4 bbox_ = make_float4(output[0], output[1], std::min((uint32_t)output[2], width), std::min((uint32_t)output[3], height));
 	
 	
 	const float4 color = make_float4( mClassColors[0][classIndex*4+0] , 
@@ -52,9 +52,9 @@ bool DrawBoxes( float* input, float* output, uint32_t width, uint32_t height, co
 	
 	printf("draw boxes  %i  %i \n", width, height);
 	printf("draw boxes  %i  %i   %f %f %f %f\n", numBoxes, classIndex, color.x, color.y, color.z, color.w);
-	printf("draw boxes  %f %f %f %f\n", boundingBoxes[0], boundingBoxes[1], boundingBoxes[2], boundingBoxes[3]);
+    //printf("draw boxes  %f %f %f %f\n", boundingBoxes[0], boundingBoxes[1], boundingBoxes[2], boundingBoxes[3]);
 	
-    if( CUDA_FAILED(cudaRectOutlineOverlay((float4*)input, (float4*)output, width, height, (float4*)&bbox_, numBoxes, color)) )
+    if( CUDA_FAILED(cudaRectOutlineOverlay((float4*)input, (float4*)output, width, height, (float4*)boundingBoxes, numBoxes, color)) )
 		return false;
 	
 	return true;
@@ -190,24 +190,26 @@ int main( int argc, char** argv )
 	
 	printf("\nyolov3-camera:  camera open for streaming\n");
 	
-	
-	/*
-	 * processing loop
-	 */
-	float confidence = 0.0f;
-	int outputCount = net.getOutputSize() / sizeof(float);
-	
-	float* outdata    = NULL;
-	float* outdataCUDA   = NULL;
-	
-	if( !cudaAllocMapped((void**)&outdata, (void**)&outdataCUDA, outputCount * sizeof(float)) )
-		printf("detectnet-console:  failed to alloc output memory\n");
 
-	//std::unique_ptr<float[]> outdata(new float[outputCount]);
+    /*
+     * allocate memory for output bounding boxes and class confidence
+     */
+    int outputCount = net.getOutputSize() / sizeof(float);
+	
+    float* outdata = NULL;
+    float* outdataCUDA = NULL;
+	
+    if( !cudaAllocMapped((void**)&outdata, (void**)&outdataCUDA, outputCount * sizeof(float)) ){
+        printf("yolov3-camera:  failed to alloc output memory\n");
+        return 0;
+    }
 
-	printf("yolov3-camera: Output size for yolov3: %d \n", outputCount);
-	int i_iter;
-	Yolo::Detection *output_ptr;
+
+    /*
+     * processing loop
+     */
+    int i_iter;
+    Yolo::Detection *output_ptr;
 	int frame_counter;
 
 	while( !signal_recieved )
@@ -216,16 +218,18 @@ int main( int argc, char** argv )
 		void* imgCUDA = NULL;
 		
 		// get the latest frame
-		if( !camera->Capture(&imgCPU, &imgCUDA, 1000) )
-			printf("\nyolov3-camera:  failed to capture frame\n");
-		//else
-		//	printf("imagenet-camera:  recieved new frame  CPU=0x%p  GPU=0x%p\n", imgCPU, imgCUDA);
-		
-		++frame_counter;
+        if( !camera->Capture(&imgCPU, &imgCUDA, 100000) )
+            printf("\nyolov3-camera:  failed to capture frame\n");
+        else
+        {
+            ++frame_counter;
+            //printf("yolov3-camera:  recieved new frame  CPU=0x%p  GPU=0x%p\n", imgCPU, imgCUDA);
+        }
+
 		// convert from YUV to RGBA
 		void* imgRGBA = NULL;
 		
-		if( !camera->ConvertRGBA(imgCUDA, &imgRGBA) )
+        if( !camera->ConvertRGBA(imgCUDA, &imgRGBA))
 			printf("yolov3-camera:  failed to convert from NV12 to RGBA\n");
 		
 		cv::Mat imgNV12_mat(camera->GetHeight(), camera->GetWidth(), CV_8U, imgCUDA);
@@ -234,56 +238,90 @@ int main( int argc, char** argv )
 		
 		std::vector<float> preprocessed_input = prepareImage(rgbImage);
 		printf("prepr-sz = %d\n", preprocessed_input.size());
+        // sleep(1);
 
 		if (preprocessed_input.size() <= 0){
 			printf("yolov3-camera: Could not preprocess image.\n");
-			break;
+            break;
 		}
 
 		net.doInference(preprocessed_input.data(), outdata);
 		//net.doInference(imgRGBA, outdata.get());
 
-		auto output = outdata;
-		auto outputCUDA = (Yolo::Detection *) &outdataCUDA[1];
+        float *output = (float *)outdata;
+        auto outputCUDA = (float *) ((size_t) outdataCUDA);
 		int count = output[0];
 		printf("%d\n", count);
-		output_ptr = (Yolo::Detection *) &output[1];
+        output_ptr = (Yolo::Detection *) &output[1];
+
+
+//        for (i_iter = 0; i_iter < count; ++i_iter)
+//        {
+//            printf("yolov3-camera: frame %d ; class %d ; probability %f \n", frame_counter, output_ptr[i_iter].classId, output_ptr[i_iter].prob);
+//            printf("               x = %f ; y = %f ; w = %04.1f ; h = %04.1f \n", output_ptr[i_iter].bbox[0], output_ptr[i_iter].bbox[1], output_ptr[i_iter].bbox[2], output_ptr[i_iter].bbox[3]);
+
+//            output_ptr[i_iter].bbox[0] *= camera->GetWidth();
+//            output_ptr[i_iter].bbox[1] *= camera->GetHeight();
+//            output_ptr[i_iter].bbox[2] += output_ptr[i_iter].bbox[0];
+//            output_ptr[i_iter].bbox[3] += output_ptr[i_iter].bbox[1];
+
+//            // This is a hack because cuda float4 type requires memory alignment to 16 bytes
+//            // if (address & 0x0000000f) // MUST BE ZERO
+//            //     return error;
+//            // TODO rewrite logic for this so that memory is aligned
+//            output[i_iter*4+0] = output_ptr[i_iter].bbox[0] ;
+//            output[i_iter*4+1] = output_ptr[i_iter].bbox[1] ;
+//            output[i_iter*4+2] = output_ptr[i_iter].bbox[2] ;
+//            output[i_iter*4+3] = output_ptr[i_iter].bbox[3] ;
+//        }
+//        CUDA(cudaDeviceSynchronize());
 
 		
-		for (i_iter = 0; i_iter < count; ++i_iter)
+        for (i_iter = 0; i_iter < count; ++i_iter)
 		{
-			printf("yolov3-camera: frame %d ; class %d ; probability %f \n", frame_counter, output_ptr[i_iter].classId, output_ptr[i_iter].prob);	
-			printf("               x = %f ; y = %f ; w = %04.1f ; h = %04.1f \n", output_ptr[i_iter].bbox[0], output_ptr[i_iter].bbox[1], output_ptr[i_iter].bbox[2], output_ptr[i_iter].bbox[3]);  
-			output_ptr[i_iter].bbox[0] *= camera->GetWidth();
-			output_ptr[i_iter].bbox[1] *= camera->GetHeight();
-			output_ptr[i_iter].bbox[2] += output_ptr[i_iter].bbox[0];
+            printf("yolov3-camera: frame %d ; class %d ; probability %f \n", frame_counter, output_ptr[i_iter].classId, output_ptr[i_iter].prob);
+            printf("               x = %f ; y = %f ; w = %04.1f ; h = %04.1f \n", output_ptr[i_iter].bbox[0], output_ptr[i_iter].bbox[1], output_ptr[i_iter].bbox[2], output_ptr[i_iter].bbox[3]);
+            output_ptr[i_iter].bbox[0] *= camera->GetWidth();
+            output_ptr[i_iter].bbox[1] *= camera->GetHeight();
+            output_ptr[i_iter].bbox[2] += output_ptr[i_iter].bbox[0];
             output_ptr[i_iter].bbox[3] += output_ptr[i_iter].bbox[1];
 
-			//CUDA(cudaDeviceSynchronize());
+            // This is a hack because cuda float4 type requires memory alignment to 16 bytes
+            // if (address & 0x0000000f) // MUST BE ZERO
+            //     return error;
+            // TODO rewrite logic for this so that memory is aligned
+            output[0] = output_ptr[i_iter].bbox[0] ;
+            output[1] = output_ptr[i_iter].bbox[1] ;
+            output[2] = output_ptr[i_iter].bbox[2] ;
+            output[3] = output_ptr[i_iter].bbox[3] ;
+
 			
-			if( !DrawBoxes((float*)imgRGBA, (float*)imgRGBA, camera->GetWidth(), camera->GetHeight(), 
-                                        output_ptr[i_iter].bbox, 1, output_ptr[i_iter].classId) ) {
+            if( !DrawBoxes((float*)imgRGBA, (float*)imgRGBA, camera->GetWidth(), camera->GetHeight(),
+                                        outputCUDA + i_iter*4, 1, output_ptr[i_iter].classId) ) {
 				printf("yolov3-camera:  failed to draw boxes\n");
 				exit(0);			
 			}
-			CUDA(cudaDeviceSynchronize());
-			
-
-			/* if( font != NULL && i_iter == 0)
+            CUDA(cudaDeviceSynchronize());
+            /*
+            if( font != NULL && i_iter == 0)
 			{
 				char str[256];
 				sprintf(str, "class %d ; probability %f \n", output_ptr[i_iter].classId, output_ptr[i_iter].prob);
 	
 				font->RenderOverlay((float4*)imgRGBA, (float4*)imgRGBA, camera->GetWidth(), camera->GetHeight(),
 								    str, 0, 0, make_float4(255.0f, 255.0f, 255.0f, 255.0f));
-			} */
+            }*/
+
+            if( display != NULL )
+            {
+                char str[256];
+                sprintf(str, "TensorRT %04.1f FPS", display->GetFPS());
+                display->SetTitle(str);
+            }
+            break;
+
 		}	
-		if( display != NULL )
-		{
-			char str[256];
-			sprintf(str, "TensorRT %04.1f FPS", display->GetFPS());
-			display->SetTitle(str);	
-		} 
+
 		
 
 		// update display
