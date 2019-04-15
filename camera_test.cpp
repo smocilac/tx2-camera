@@ -41,6 +41,8 @@ bool DrawBoxes( float* input, float* output, uint32_t width, uint32_t height, co
 	if( !input || !output || width == 0 || height == 0 || !boundingBoxes || numBoxes < 1 || classIndex < 0 )
 		return false;
 
+
+    const float4 bbox_ = make_float4(output[0], output[1], std::min((uint32_t)output[2], width), std::min((uint32_t)output[3], height));
 	
 	
 	const float4 color = make_float4( mClassColors[0][classIndex*4+0] , 
@@ -52,7 +54,7 @@ bool DrawBoxes( float* input, float* output, uint32_t width, uint32_t height, co
 	printf("draw boxes  %i  %i   %f %f %f %f\n", numBoxes, classIndex, color.x, color.y, color.z, color.w);
 	printf("draw boxes  %f %f %f %f\n", boundingBoxes[0], boundingBoxes[1], boundingBoxes[2], boundingBoxes[3]);
 	
-	if( CUDA_FAILED(cudaRectOutlineOverlay((float4*)input, (float4*)output, width, height, (float4*)boundingBoxes, numBoxes, color)) )
+    if( CUDA_FAILED(cudaRectOutlineOverlay((float4*)input, (float4*)output, width, height, (float4*)&bbox_, numBoxes, color)) )
 		return false;
 	
 	return true;
@@ -246,10 +248,7 @@ int main( int argc, char** argv )
 		int count = output[0];
 		printf("%d\n", count);
 		output_ptr = (Yolo::Detection *) &output[1];
-		
-		/*vector<Detection> result;
-        	result.resize(count);
-		memcpy(result.data(), &output[1], count*sizeof(Detection));*/
+
 		
 		for (i_iter = 0; i_iter < count; ++i_iter)
 		{
@@ -258,14 +257,12 @@ int main( int argc, char** argv )
 			output_ptr[i_iter].bbox[0] *= camera->GetWidth();
 			output_ptr[i_iter].bbox[1] *= camera->GetHeight();
 			output_ptr[i_iter].bbox[2] += output_ptr[i_iter].bbox[0];
-			output_ptr[i_iter].bbox[3] += output_ptr[i_iter].bbox[1];
-			const float4 bbox_ = make_float4(output_ptr[i_iter].bbox[0], output_ptr[i_iter].bbox[1], 
-					std::min((uint32_t)output_ptr[i_iter].bbox[2],camera->GetWidth()) , std::min((uint32_t)output_ptr[i_iter].bbox[3], camera->GetHeight()));
+            output_ptr[i_iter].bbox[3] += output_ptr[i_iter].bbox[1];
 
 			//CUDA(cudaDeviceSynchronize());
 			
 			if( !DrawBoxes((float*)imgRGBA, (float*)imgRGBA, camera->GetWidth(), camera->GetHeight(), 
-				                        (float*)&bbox_, 1, output_ptr[i_iter].classId) ) {
+                                        output_ptr[i_iter].bbox, 1, output_ptr[i_iter].classId) ) {
 				printf("yolov3-camera:  failed to draw boxes\n");
 				exit(0);			
 			}
